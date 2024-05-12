@@ -1,0 +1,263 @@
+# load data and library
+```{r}
+# install(arulesSequences)
+# install(purrr)
+# install(dplyr)
+
+source("instance_permutation.R")
+source("redundancy.R")
+```
+# preprocess iSnap data
+
+```{r}
+#### The code below reads the raw iSnap dataset and prepossesses it. For illustration, I provided a small piece of the dataset and read it in the next code chunk.
+#### You could skip this chunk, unless you want to play with the full dataset. You need to download it from https://pslcdatashop.web.cmu.edu/Project?id=321  
+
+# data <- read.csv("ds2738_tx_All_Data_4628_2018_1019_122016.txt", header = TRUE,
+#                  sep = "\t")
+# data <- data %>% select(Anon.Student.Id, Action)
+# 
+# ## combine actions with few occurrences
+# 
+# action_counts <- table(data$Action) %>% as.data.frame()
+# action_counts$Var1 <- as.character(action_counts$Var1)
+# action_counts <-  action_counts %>% rowwise()%>%
+#   mutate(new_action = ifelse(Freq < 50, "others", Var1))
+# action_counts <- action_counts %>% filter(Freq < 50)
+# 
+# data <- data %>% rowwise()  %>%
+#   mutate(Action = ifelse(Action %in% action_counts$Var1, "others", Action))
+# 
+# 
+# data$Anon.Student.Id <- as.factor(data$Anon.Student.Id) %>% as.numeric()
+# user_id <- unique(data$Anon.Student.Id)
+# 
+# set.seed(125)
+# train_index <- sample(user_id, length(user_id)*1/2)
+# 
+# train_data <- data[data$Anon.Student.Id %in% train_index, ]
+# test_data <- data[!data$Anon.Student.Id %in% train_index, ]
+# 
+# add_eid <- function(df){
+#   df[,"event_id"] <- 1:nrow(df)
+#   df[,"seq"] <- as.numeric(factor(df[,"Anon.Student.Id"], levels = unique((df[,"Anon.Student.Id"]))))-1
+#   df <- df%>%
+#     mutate(event_id = event_id + seq*10) %>% select(-seq)
+#   return(df)
+# }
+# 
+# 
+# 
+# train_data <- add_eid(train_data)
+# test_data <- add_eid(test_data)
+# 
+# 
+# write.csv(train_data, file = "train.csv", row.names = FALSE)
+# write.csv(test_data, file = "test.csv", row.names = FALSE)
+```
+
+
+## example data
+
+```{r}
+train_data <- read.csv("example data/train.csv")
+```
+
+# parameter setting
+
+```{r}
+support <- 0.7
+maxgap <- 1
+ID_col = 'Anon.Student.Id' # indicate the column name of sequence ID
+event_col = 'Action' # indicate the column name of event 
+EID_col = 'event_id' # indicate the column name of event ID
+
+# create an event-int mapping list
+event_dic <- unlist(unique(train_data[,event_col]))
+```
+
+# preprocessing
+
+```{r}
+data <- train_data
+data <- data %>% arrange(!!as.name(ID_col), !!as.name(EID_col))
+
+# convert event to int so that we could convert the dataframe to an int matrix to improve the computing efficiency
+for (i in 1:length(event_dic)) {
+  data[ data[,event_col] == event_dic[i], event_col] <- i
+}
+data[,event_col] <- as.numeric(data[,event_col])
+
+# getFreqSeq
+pattern_support <- getFreqSeq(data, support=support, maxgap = maxgap,
+                              ID_col = ID_col, event_col = event_col, EID_col = EID_col)
+
+train_data <- preprocess(data, ID_col = ID_col, event_col = event_col, EID_col = EID_col, gap = maxgap)
+
+patterns <- pattern_support$sequence %>% 
+  gsub("> => <",",", x=., fixed = TRUE) %>%
+        gsub("{","", x=., fixed = TRUE) %>%
+        gsub("}","", x=., fixed = TRUE)%>%
+        gsub("<","", x=., fixed = TRUE)%>%
+        gsub(">","", x=., fixed = TRUE)
+
+
+patterns <- patterns_to_events(patterns)
+events_in_patterns <- patterns$events_in_patterns
+patterns <- patterns$patterns
+```
+
+
+# count occurrences in the real dataset
+
+```{r}
+system.time({
+real_instances_train <- count_instances(events_in_patterns = events_in_patterns,
+                               event_dic = event_dic,
+                             data = train_data,
+                             ID_col = ID_col, event_col = event_col, EID_col = EID_col,
+                             gap = maxgap)
+})
+mean_occurrences_train <- colMeans(as.matrix(real_instances_train[,-1]))
+
+train_data <- train_data[,c(ID_col, event_col, EID_col)]
+```
+
+# permutation data and counting
+
+```{r}
+n_permutations <- 10
+start_seed <- 201
+end_seed <- start_seed + n_permutations-1
+mean_occurrences_train_permutated <- lapply(start_seed:end_seed,
+                               function(seed_i) permutating_and_counting(data = train_data, gap = maxgap,
+                                                                         ID_col = ID_col, event_col = event_col, EID_col = EID_col,
+                                                                         events_in_patterns = events_in_patterns, event_dic = event_dic,
+                                                                         seed = seed_i)) 
+## Use parallel computing to save time
+#nclusters <- 2
+# system.time({
+#   cl <- makeCluster(nclusters)
+#   clusterEvalQ(cl, {library(dplyr); library(purrr); library(matrixStats); source("instance.R")})
+#   clusterExport (cl, varlist = c("permutating_and_counting", 'event_dic',
+#                                  'maxgap', 'ID_col', 'event_col', 'EID_col',
+#                                  'events_in_patterns', 'patterns',
+#                                  'train_data'))
+# mean_occurrences_train_permutated <- parLapply(cl, start_seed:end_seed,
+#                                function(seed_i) permutating_and_counting(data = train_data, gap = maxgap,
+#                                                                        ID_col = ID_col, event_col = event_col, EID_col = EID_col,
+#                                                                        events_in_patterns = events_in_patterns, event_dic = event_dic,
+#                                                                        seed = seed_i))
+#   stopCluster(cl)
+# })
+
+```
+
+
+# permutation test
+
+```{r}
+train_per_df <- bind_rows(mean_occurrences_train_permutated)
+train_pval <- sapply(patterns, function(x) mean(train_per_df[,x] > mean_occurrences_train[x])) %>% p.adjust('BY')
+
+sound_train <- train_pval < 0.05
+
+sound_train
+```
+
+# identify redundancy
+
+```{r}
+source("redundancy.R")
+sig_patterns <- patterns[sound_train]
+## identify_redundancy returns a list of two items: 
+### item 1 indicates the redundancy of each pattern, with TRUE meaning redundant
+### item 2 indicates the pair of a pattern and one of its redundant subpattern 
+pattern_redundancy <- identify_redundancy(sig_patterns = sig_patterns, 
+                            raw_mean_occurrences = mean_occurrences_train,
+                            permutation_df = train_per_df,
+                            maxgap = maxgap)
+"pattern redundancy"
+table(pattern_redundancy[[1]])
+"redundant pattern pair"
+pattern_redundancy[[2]]
+```
+
+# computing generalization on test data
+
+## preprocessing
+
+```{r}
+# test_data <- test_data %>% arrange(!!as.name(ID_col), !!as.name(EID_col))
+# 
+# for (i in 1:length(event_dic)) {
+#   test_data[ test_data[,event_col] == event_dic[i], event_col] <- i
+# }
+# 
+# test_data[,event_col] <- as.numeric(test_data[,event_col])
+# 
+# test_data <- preprocess(test_data, ID_col = ID_col, event_col = event_col, EID_col = EID_col, gap = maxgap)
+```
+
+## count occurrences in the real dataset
+
+```{r}
+# system.time({
+# real_instances_test <- count_instances(events_in_patterns = events_in_patterns,
+#                                event_dic = event_dic,
+#                              data = test_data,
+#                              ID_col = ID_col, event_col = event_col, EID_col = EID_col,
+#                              gap = maxgap)
+# })
+# mean_occurrences_test <- colMeans(as.matrix(real_instances_test[,-1]))
+# 
+# test_data <- test_data[,c(ID_col, event_col, EID_col)]
+```
+
+## permutation data and counting
+
+```{r}
+# n_permutations <- 10
+# start_seed <- 201
+# end_seed <- start_seed + n_permutations-1
+# mean_occurrences_test_permutated <- lapply(start_seed:end_seed,
+#                                function(seed_i) permutating_and_counting(data = test_data, gap = maxgap,
+#                                                                          ID_col = ID_col, event_col = event_col, EID_col = EID_col,
+#                                                                          events_in_patterns = events_in_patterns, event_dic = event_dic,
+#                                                                          seed = seed_i)) 
+## Use parallel computing to save time
+#nclusters <- 2
+# system.time({
+#   cl <- makeCluster(nclusters)
+#   clusterEvalQ(cl, {library(dplyr); library(purrr); library(matrixStats); source("instance.R")})
+#   clusterExport (cl, varlist = c("permutating_and_counting", 'event_dic',
+#                                  'maxgap', 'ID_col', 'event_col', 'EID_col',
+#                                  'events_in_patterns', 'patterns',
+#                                  'test_data'))
+# mean_occurrences_test_permutated <- parLapply(cl, start_seed:end_seed,
+#                                function(seed_i) permutating_and_counting(data = test_data, gap = maxgap,
+#                                                                        ID_col = ID_col, event_col = event_col, EID_col = EID_col,
+#                                                                        events_in_patterns = events_in_patterns, event_dic = event_dic,
+#                                                                        seed = seed_i))
+#   stopCluster(cl)
+# })
+
+```
+
+## computing agreement
+
+```{r}
+# test_per_df <- bind_rows(mean_occurrences_test_permutated)
+# test_pval <- sapply(patterns, function(x) mean(test_per_df[,x] > mean_occurrences_test[x])) %>% p.adjust('BY')
+# sound_test <- test_pval < 0.05
+
+# computing agreement
+# prop.table(table(sound_train, sound_test))
+# library(caret)
+# confusionMatrix(as.factor(sound_train), 
+#                 as.factor(sound_test), 
+#                 positive = "TRUE",
+#                 mode = "prec_recall")
+
+
+```
